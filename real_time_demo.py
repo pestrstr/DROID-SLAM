@@ -1,7 +1,6 @@
 import sys
 sys.path.append('droid_slam')
 
-from tqdm import tqdm
 import numpy as np
 import torch
 import lietorch
@@ -13,6 +12,7 @@ import argparse
 
 from torch.multiprocessing import Process
 from droid import Droid
+from utils.realsense import *
 
 import torch.nn.functional as F
 
@@ -22,7 +22,7 @@ def show_image(image):
     cv2.imshow('image', image / 255.0)
     cv2.waitKey(1)
 
-def image_stream(imagedir, calib, stride):
+def image_stream(camera, calib):
     """ image generator """
 
     calib = np.loadtxt(calib, delimiter=" ")
@@ -32,18 +32,19 @@ def image_stream(imagedir, calib, stride):
     K[0,0] = fx
     K[0,2] = cx
     K[1,1] = fy
-    K[1,2] = cy
+    K[1,2] = cy        
 
-    file_list = sorted(os.listdir(imagedir))[::stride]
-    
-    # Filter images from the directory (other files could also be present)
-    image_list = []
-    for file in file_list:
-        if file.endswith(('.jpg', '.png', '.jpeg')):
-            image_list.append(file)
+    pipeline = camera['pipeline']
+    align = camera['align']
 
-    for t, imfile in enumerate(image_list):
-        image = cv2.imread(os.path.join(imagedir, imfile))
+    while True:
+        # NOTE: read_rs_camera also returns camera intrinsincs as parameters
+        # so maybe it can be used instead of specifying them manually with possible errors.
+
+        image, _, _ = read_rs_camera(
+            pipeline, align
+        )
+        
         if len(calib) > 4:
             image = cv2.undistort(image, K, calib[4:])
 
@@ -60,7 +61,6 @@ def image_stream(imagedir, calib, stride):
         intrinsics[1::2] *= (h1 / h0)
 
         yield t, image[None], intrinsics
-
 
 def save_reconstruction(droid, reconstruction_path):
 
@@ -85,10 +85,9 @@ def save_reconstruction(droid, reconstruction_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--imagedir", type=str, help="path to image directory")
+    parser.add_argument("--camera_id", type=str, help="camera id (see ls /dev | grep video)")
     parser.add_argument("--calib", type=str, help="path to calibration file")
     parser.add_argument("--t0", default=0, type=int, help="starting frame")
-    parser.add_argument("--stride", default=3, type=int, help="frame stride")
 
     parser.add_argument("--weights", default="droid.pth")
     parser.add_argument("--buffer", type=int, default=512)
@@ -121,7 +120,28 @@ if __name__ == '__main__':
         args.upsample = True
 
     tstamps = []
-    for (t, image, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.stride)):
+    
+    # NOTE: Here I am using a RealSense DepthCamera as a simple RGB/Color camera, 
+    # despite the fact that we could also use Depth Image from the camera.
+    
+    width = 640
+    height = 480
+    (
+        pipeline, 
+        align, 
+        _, 
+        _, 
+        depth_scale_meters, 
+        _, 
+        _ 
+    ) = init_rs_camera(width, height)
+
+    #TODO: Understand how to use depth_scale_meters
+    print(depth_scale_meters)
+
+    camera = dict(pipeline=pipeline, align=align, depth_scale_meters=depth_scale_meters)
+
+    for (t, image, intrinsics) in image_stream(camera, args.calib):
         if t < args.t0:
             continue
 
